@@ -359,3 +359,118 @@ pdf_demo = gr.Interface(
 
 app = gr.TabbedInterface([demo, pdf_demo], ["Metin Etiketleme", "PDF Etiketleme"])
 app.launch()
+
+#app2.0
+import gradio as gr
+import tempfile
+import uuid
+import os
+import fitz
+from transformers import AutoTokenizer, AutoModelForTokenClassification, pipeline
+
+model_path = "./ner_model"
+tokenizer = AutoTokenizer.from_pretrained(model_path)
+model = AutoModelForTokenClassification.from_pretrained(model_path)
+ner_pipeline = pipeline("ner", model=model, tokenizer=tokenizer, aggregation_strategy="simple")
+
+label_colors = {
+    "sirket": (0.56, 0.93, 0.56),
+    "tarih": (0.68, 0.85, 0.90),
+    "ad_soyad": (1.0, 0.71, 0.76),
+    "para": (0.94, 0.90, 0.55),
+    "adres": (0.94, 0.50, 0.50),
+    "telefon": (0.87, 0.63, 0.87),
+    "tc_kimlik": (1.0, 0.65, 0.0)
+}
+
+def etiketle(text):
+    entities = ner_pipeline(text)
+    entities = sorted(entities, key=lambda x: x['start'])
+    highlighted = ""
+    last_idx = 0
+    for ent in entities:
+        start, end, label = ent['start'], ent['end'], ent['entity_group']
+        color_rgb = label_colors.get(label)
+        if color_rgb:
+            color_str = f"rgba({int(color_rgb[0]*255)}, {int(color_rgb[1]*255)}, {int(color_rgb[2]*255)}, 0.5)"
+        else:
+            color_str = "lightgray"
+        highlighted += text[last_idx:start]
+        highlighted += f"<span style='background-color:{color_str}; padding:2px 4px; border-radius:4px; font-weight: bold;' title='{label}'>"
+        highlighted += "*" * len(text[start:end])
+        highlighted += "</span>"
+        last_idx = end
+    highlighted += text[last_idx:]
+    return highlighted
+
+def etiketli_pdf_uret(pdf_file, secilen_etiketler):
+    if not secilen_etiketler:
+        gr.Warning("Hiçbir etiket türü seçilmedi! Orijinal PDF döndürülüyor.")
+        return pdf_file.name
+
+    doc = fitz.open(pdf_file.name)
+
+    for page in doc:
+        words = page.get_text("words")
+        if not words:
+            continue
+        text = " ".join(w[4] for w in words)
+        ner_results = ner_pipeline(text)
+
+        for ent in ner_results:
+            label = ent['entity_group']
+            if label not in secilen_etiketler:
+                continue
+            ent_text = ent['word'].replace("##", "").strip()
+            color = label_colors.get(label, (1, 1, 0))
+            for w in words:
+                kelime = w[4].strip()
+                if kelime.lower() in ent_text.lower() or ent_text.lower() in kelime.lower():
+                    rect = fitz.Rect(w[0], w[1], w[2], w[3])
+                    page.draw_rect(rect, color=(1, 1, 1), fill=(1, 1, 1))
+                    highlight = page.add_highlight_annot(rect)
+                    highlight.set_colors(stroke=color)
+                    highlight.update(opacity=0.4)
+                    yildizli = "*" * len(kelime)
+                    page.insert_text(
+                        point=(rect.x0, rect.y1-1),
+                        text=yildizli,
+                        fontsize=10,
+                        fontname="helv",
+                        color=(0, 0, 0)
+                    )
+
+    output_path = os.path.join(tempfile.gettempdir(), f"etiketlenmis_{uuid.uuid4().hex}.pdf")
+    doc.save(output_path, garbage=4, deflate=True, clean=True)
+    doc.close()
+    return output_path
+
+demo = gr.Interface(
+    fn=etiketle,
+    inputs=gr.Textbox(lines=8, placeholder="Şikayet metnini buraya yazın veya yapıştırın...", label="Metin Girişi"),
+    outputs=gr.HTML(label="Etiketlenmiş Metin"),
+)
+
+etiket_secenekleri = list(label_colors.keys())
+varsayilan_secim = list(label_colors.keys())
+
+pdf_demo = gr.Interface(
+    fn=etiketli_pdf_uret,
+    inputs=[
+        gr.File(label="PDF Dosyası Yükle (.pdf)"),
+        gr.CheckboxGroup(
+            choices=etiket_secenekleri,
+            value=varsayilan_secim,
+            label="Maskelenecek Bilgi Türleri"
+        )
+    ],
+    outputs=gr.File(label="İşlenmiş PDF Dosyası")
+)
+
+app = gr.TabbedInterface(
+    [demo, pdf_demo],
+    ["Metin Etiketleme", "PDF Etiketleme"]
+)
+
+app.launch()
+
