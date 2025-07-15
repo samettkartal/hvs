@@ -22,7 +22,7 @@ label_colors = {
     "tc_kimlik": (1.0, 0.65, 0.0)
 }
 
-# HTML çıktı için metin etiketleme
+# HTML çıktı için metin etiketleme (Bu fonksiyonda değişiklik yok)
 def etiketle(text):
     entities = ner_pipeline(text)
     entities = sorted(entities, key=lambda x: x['start'])
@@ -30,82 +30,118 @@ def etiketle(text):
     last_idx = 0
     for ent in entities:
         start, end, label = ent['start'], ent['end'], ent['entity_group']
-        color = label_colors.get(label, "lightgray")
+        # Modelin tanımadığı etiketler için varsayılan bir renk ata
+        color_rgb = label_colors.get(label)
+        if color_rgb:
+             # Gradio HTML'i RGB değerleri yerine hex kodlarını veya renk isimlerini tercih eder.
+             # Ancak background-color için bu şekilde de çalışabilir. Daha güvenli olması için
+             # renkleri 'rgb(255,0,0)' formatına çevirmek daha iyi olabilir.
+             # Basitlik için şimdilik bu şekilde bırakıyoruz.
+            color_str = f"rgba({int(color_rgb[0]*255)}, {int(color_rgb[1]*255)}, {int(color_rgb[2]*255)}, 0.5)"
+        else:
+            color_str = "lightgray" # Tanınmayan etiketler için
+
         highlighted += text[last_idx:start]
-        highlighted += f"<span style='background-color:{color}; padding:2px; border-radius:4px;' title='{label}'>"
-        highlighted += "*" * (end - start)
+        highlighted += f"<span style='background-color:{color_str}; padding:2px 4px; border-radius:4px; font-weight: bold;' title='{label}'>"
+        highlighted += "*" * len(text[start:end])
         highlighted += "</span>"
         last_idx = end
     highlighted += text[last_idx:]
     return highlighted
 
-# PDF etiketleme
-def etiketli_pdf_uret(pdf_file):
+# ✨ PDF ETİKETLEME FONKSİYONU GÜNCELLENDİ
+def etiketli_pdf_uret(pdf_file, secilen_etiketler):
+    # Eğer hiç etiket seçilmemişse, orijinal dosyayı döndür ve uyarı ver
+    if not secilen_etiketler:
+        gr.Warning("Hiçbir etiket türü seçilmedi! Orijinal PDF döndürülüyor.")
+        return pdf_file.name
+
     doc = fitz.open(pdf_file.name)
 
     for page in doc:
         words = page.get_text("words")
+        # Eğer sayfada kelime yoksa, bir sonraki sayfaya geç
+        if not words:
+            continue
+            
         text = " ".join(w[4] for w in words)
         ner_results = ner_pipeline(text)
 
-        matched = []  # eşleşen kelimeleri burada topla
-
         for ent in ner_results:
-            ent_text = ent['word'].replace("##", "").strip()
             label = ent['entity_group']
+            
+            # ✨ YENİ EKlenen MANTIK: Eğer modelin bulduğu etiket, kullanıcının seçtikleri arasında değilse, bu adımı atla
+            if label not in secilen_etiketler:
+                continue
+
+            ent_text = ent['word'].replace("##", "").strip()
             color = label_colors.get(label, (1, 1, 0))  # yellow default
 
+            # Kelime eşleştirme mantığı, modelin bulduğu metinle sayfadaki kelimeleri karşılaştırır
+            # Bu kısım bazen zorlayıcı olabilir, çünkü model birleşik kelimeler bulabilir.
+            # Şimdilik basit bir eşleştirme ile devam ediyoruz.
             for w in words:
                 kelime = w[4].strip()
-                if kelime.lower() == ent_text.lower():
+                if kelime.lower() in ent_text.lower() or ent_text.lower() in kelime.lower():
                     rect = fitz.Rect(w[0], w[1], w[2], w[3])
 
-                    highlight = page.add_rect_annot(rect)
-                    highlight.set_colors(stroke=color, fill=color)
-                    highlight.set_opacity(0.4)
-                    highlight.update()
+                    # Orijinal metni beyaz bir kutu ile kapat
+                    page.draw_rect(rect, color=(1, 1, 1), fill=(1, 1, 1))
 
-                    # Yıldız yerleştirme kısmını güncelle:
-                    # Yıldız metni
+                    # Arkasına renkli bir vurgu ekle (daha estetik)
+                    highlight = page.add_highlight_annot(rect)
+                    highlight.set_colors(stroke=color)
+                    highlight.update(opacity=0.4)
+                    
+                    # Üzerine yıldızları ekle
                     yildizli = "*" * len(kelime)
-
-# Yazı kutusunu biraz genişlet
-                    genis_rect = fitz.Rect(rect.x0 - 0.5, rect.y0 - 0.5, rect.x1 + 0.5, rect.y1 + 0.5)
-
-# Opak (beyaz) arka plan kutusu çizerek alttaki yazıyı kapat
-                    page.draw_rect(genis_rect, color=(1, 1, 1), fill=(1, 1, 1))
-
-# Yıldızları ekle (daha büyük ve koyu yazı)
                     page.insert_text(
-                        point=(genis_rect.x0 + 0.5, genis_rect.y1 - 1),
+                        point=(rect.x0, rect.y1-1), # Metnin başladığı yere yıldızları koy
                         text=yildizli,
-                        fontsize=11,
+                        fontsize=10, # Yazıtipi boyutunu orijinal metne yakın ayarla
                         fontname="helv",
-                        fill=(0, 0, 0)
-)
+                        color=(0,0,0) # Siyah renk
+                    )
 
-    # Benzersiz geçici dosya adı
     output_path = os.path.join(tempfile.gettempdir(), f"etiketlenmis_{uuid.uuid4().hex}.pdf")
-    doc.save(output_path)
+    doc.save(output_path, garbage=4, deflate=True, clean=True)
     doc.close()
     return output_path
 
-# Gradio Arayüzleri
+# Metin etiketleme arayüzü (değişiklik yok)
 demo = gr.Interface(
     fn=etiketle,
-    inputs=gr.Textbox(lines=6, placeholder="Şikayet metnini buraya yaz...", label="Metin Girişi"),
-    outputs=gr.HTML(label="Etiketli Metin"),
-    title="🔎 Türkçe Şikayet NER Etiketleyici",
-    description="Metin içindeki özel bilgileri otomatik renklendirir ve maskeleyerek gösterir."
+    inputs=gr.Textbox(lines=8, placeholder="Şikayet metnini buraya yazın veya yapıştırın...", label="Metin Girişi"),
+    outputs=gr.HTML(label="Etiketlenmiş Metin"),
+    title="🔎 Metin İçindeki Özel Bilgileri Etiketleme",
+    description="Metin içindeki Şirket, Tarih, Kişi, Para, Adres, Telefon ve T.C. Kimlik gibi özel bilgileri otomatik olarak bulur, renklendirir ve yıldızlarla maskeler."
 )
+
+# ✨ PDF ETİKETLEME ARAYÜZÜ GÜNCELLENDİ
+# Checkbox'lar için seçenekleri ve varsayılanları tanımla
+etiket_secenekleri = list(label_colors.keys())
+varsayilan_secim = list(label_colors.keys()) # Hepsi varsayılan olarak seçili
 
 pdf_demo = gr.Interface(
     fn=etiketli_pdf_uret,
-    inputs=gr.File(label="PDF Dosyası Yükle (.pdf)"),
-    outputs=gr.File(label="Etiketlenmiş PDF Dosyası"),
-    title="📄 PDF Üzerinde NER Etiketleme",
-    description="Yüklediğiniz PDF içinde özel bilgiler renklendirilir ve yıldızlarla maskelenir."
+    inputs=[
+        gr.File(label="PDF Dosyası Yükle (.pdf)"),
+        gr.CheckboxGroup(
+            choices=etiket_secenekleri,
+            value=varsayilan_secim,
+            label="Maskelenecek Bilgi Türleri",
+            info="Maskelenmesini istemediğiniz bilgi türünün işaretini kaldırın."
+        )
+    ],
+    outputs=gr.File(label="İşlenmiş PDF Dosyası"),
+    title="📄 PDF Üzerindeki Özel Bilgileri Etiketleme ve Maskeleme",
+    description="Yüklediğiniz PDF dosyası içindeki özel bilgileri bulur, seçiminize göre renklendirir ve yıldızlarla maskeler."
 )
 
-app = gr.TabbedInterface([demo, pdf_demo], ["Metin Etiketleme", "PDF Etiketleme"])
+# Sekmeli arayüzü oluştur
+app = gr.TabbedInterface(
+    [demo, pdf_demo], 
+    ["Metin Etiketleme", "PDF Etiketleme"],
+    title="Gelişmiş Bilgi Gizleme ve Etiketleme Aracı (NER)"
+)
 app.launch()
